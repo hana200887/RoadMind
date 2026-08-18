@@ -1,0 +1,41 @@
+"""Typed data contracts for the RDD2022 dataset foundation (ROAD-001A)."""
+
+from roadmind.data.models import (
+    RDD2022_CLASS_NAMES,
+    RDD2022_DATASET_ID,
+    RDD2022_DOMAIN_SPLITS,
+    RDD2022_MANIFEST_SCHEMA_VERSION,
+    AnnotationRecord,
+    AnnotationSource,
+    BoundingBoxXYXY,
+    DamageClass,
+    DatasetContractError,
+    DatasetContractErrorCode,
+    DatasetDomain,
+    DatasetIssue,
+    DatasetIssueCode,
+    DatasetSplit,
+    ImageAsset,
+    IssueSeverity,
+    SampleRecord,
+)
+
+__all__ = [
+    "RDD2022_CLASS_NAMES",
+    "RDD2022_DATASET_ID",
+    "RDD2022_DOMAIN_SPLITS",
+    "RDD2022_MANIFEST_SCHEMA_VERSION",
+    "AnnotationRecord",
+    "AnnotationSource",
+    "BoundingBoxXYXY",
+    "DamageClass",
+    "DatasetContractError",
+    "DatasetContractErrorCode",
+    "DatasetDomain",
+    "DatasetIssue",
+    "DatasetIssueCode",
+    "DatasetSplit",
+    "ImageAsset",
+    "IssueSeverity",
+    "SampleRecord",
+]

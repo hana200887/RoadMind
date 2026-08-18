@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  quality:
+    name: Quality and unit tests (CPU, no real dataset)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install Python
+        run: uv python install 3.11
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+      - name: Lockfile check
+        run: uv lock --check
+      - name: Format check
+        run: uv run --frozen ruff format --check .
+      - name: Lint
+        run: uv run --frozen ruff check .
+      - name: Type check
+        run: uv run --frozen mypy --strict src/roadmind
+      - name: Unit tests with coverage
+        run: >-
+          uv run --frozen pytest -m "not rdd2022"
+          --cov=roadmind.data --cov-branch --cov-fail-under=90 -q
+      - name: Dependency audit
+        run: uv run --frozen pip-audit
+      - name: Wheel build
+        run: uv build --wheel --no-build-isolation
+      - name: Wheel contents include roadmind.data
+        run: >-
+          uv run --frozen python -c
+          "import glob, zipfile; w = glob.glob('dist/roadmind-*.whl')[0];
+          names = zipfile.ZipFile(w).namelist();
+          assert 'roadmind/data/models.py' in names, names;
+          assert 'roadmind/data/__init__.py' in names, names"
+      - name: Wheel install and import smoke test
+        run: |
+          uv venv --python 3.11 /tmp/roadmind-smoke
+          uv pip install --python /tmp/roadmind-smoke/bin/python dist/roadmind-*.whl
+          /tmp/roadmind-smoke/bin/python -c "import roadmind.data; assert roadmind.data.RDD2022_DATASET_ID == 'rdd2022-roadmind-four-class-v1'"
+          /tmp/roadmind-smoke/bin/python -c "import inspect, roadmind.data; assert 'site-packages' in inspect.getfile(roadmind.data), inspect.getfile(roadmind.data)"

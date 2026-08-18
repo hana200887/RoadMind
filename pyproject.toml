@@ -1,0 +1,53 @@
+[project]
+name = "roadmind"
+version = "0.1.0"
+description = "RoadMind: deterministic, read-only preparation and audit tooling for the RDD2022 road-damage dataset."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "pydantic>=2,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "hatchling",
+    "mypy",
+    "pip-audit",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/roadmind"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+markers = [
+    "rdd2022: tests that require the real RDD2022 dataset root via ROADMIND_RDD2022_ROOT",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "C4"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/roadmind"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/roadmind"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
