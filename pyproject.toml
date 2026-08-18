@@ -5,6 +5,8 @@ description = "RoadMind: deterministic, read-only preparation and audit tooling 
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "defusedxml>=0.7.1",
+    "pillow>=12.3.0",
     "pydantic>=2,<3",
 ]
 
@@ -43,6 +45,10 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "C4"]
 python_version = "3.11"
 strict = true
 files = ["src/roadmind"]
+
+[[tool.mypy.overrides]]
+module = ["defusedxml", "defusedxml.*"]
+ignore_missing_imports = true
 
 [tool.coverage.run]
 branch = true
