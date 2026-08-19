@@ -119,6 +119,41 @@ git diff --check                        # clean
 | Grayscale (`L`) factory images crashed `Image.new` with an RGB tuple | Factory uses a single-int fill for `L` mode |
 | Truncated/corrupt/spoofed/EXIF-invalid images leave their XML without a valid image | Consistent semantics: the XML is reported `ORPHAN_ANNOTATION` alongside the image issue |
 
+## Review round 2 (REQUEST CHANGES) and fixes
+
+| Finding | Severity | Fix | Verification |
+|---|---|---|---|
+| A domain, `train`, `images`, or `test` directory that is a symlink/junction (even resolving inside the root) was accepted via `is_dir()`; a `Japan` junction to an outside dir produced a valid sample and no issue | P1 | `_build_domain_layout` now rejects layout paths that are links via `_is_link`/`_usable_layout_dir`; offending paths are recorded in `DomainLayout.unsafe_paths` and surfaced as `UNSAFE_SOURCE_PATH` issues; the linked directories are never walked or read | `test_domain_level_junction_unsafe`, `test_domain_level_junction_inside_root_unsafe`, `test_train_level_junction_unsafe`, `test_images_level_junction_unsafe`, `test_test_dir_junction_unsafe` (junction via `mklink /J`, no admin needed) |
+| Non-`.jpg` files under `train/images` (`.png`, `.jpeg`, arbitrary) were dropped before inventory/validation, so ROAD-001C could not derive a complete inventory or detect format drift | P1 | All readable files under image/annotation/public-test dirs are inventoried into `source_files`; non-`.jpg` files under the images directory are flagged `UNSUPPORTED_IMAGE_FORMAT` (blocking) and excluded from pairing; non-`.xml` annotation files are inventoried without a pairing role | `test_unsupported_image_file_inventoried_and_flagged` (3 suffixes), `test_annotation_dir_extra_files_inventoried` |
+| `_record_source` read `read_bytes()` unguarded before validation, so a permission change/concurrent removal aborted the whole scan | P2 | `_record_source` returns `None` on `OSError`; each per-file boundary emits the appropriate issue (`CORRUPT_IMAGE` for images/public test, `MALFORMED_XML` for annotations) and the scan continues | `test_unreadable_source_file_does_not_abort_scan` (selective `PermissionError` via monkeypatched `Path.read_bytes`) |
+| Strict mypy failed: `images_dir`/`annotations_dir`/`public_test_dir` inferred as `Path` then assigned `None` in the junction branches | P1 | Candidate paths are typed `Path`; the assigned variables are declared `Path | None` up front | `mypy --strict` clean |
+| New tests not formatter-compliant | P2 | `ruff format` applied | `ruff format --check .` clean |
+
+## Re-run evidence after review round 2
+
+```text
+uv run --frozen pytest tests/unit/test_rdd2022_parser.py -q
+# 85 passed, 2 skipped
+
+uv run --frozen pytest tests/unit/test_rdd2022_parser.py --cov=roadmind.data.rdd2022 --cov-branch --cov-report=term-missing --cov-fail-under=90 -q
+# src\roadmind\data\rdd2022.py  434    26    140    11   94%   (>= 90%)
+# Remaining uncovered lines are Windows-unreachable OSError/symlink/case-collision
+# filesystem branches and the defensive INTERNAL_ERROR catch.
+
+uv run --frozen pytest -m "not rdd2022" -q
+# 285 passed, 2 skipped
+
+uv run --frozen ruff format --check .   # 12 files already formatted
+uv run --frozen ruff check .            # All checks passed!
+uv run --frozen mypy --strict src/roadmind
+# Success: no issues found in 4 source files
+
+uv lock --check                         # Resolved 50 packages
+uv run --frozen pip-audit               # No known vulnerabilities found
+uv build --wheel --no-build-isolation   # wheel contains roadmind/data/rdd2022.py
+git diff --check                        # clean
+```
+
 ## Remaining notes
 
 - Real RDD2022 has not been required or claimed; running against real data is

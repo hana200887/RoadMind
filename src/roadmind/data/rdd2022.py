@@ -18,6 +18,17 @@ Determinism contract:
 - All results are sorted by normalized raw-root-relative POSIX path
   (samples by ``sample_id``, source files and excluded public-test images by
   path, issues by ``(code, domain, paths, sample_id)``).
+- ``source_files`` is a complete read-only inventory: every readable file
+  under the scanned image/annotation/public-test directories is hashed
+  (raw SHA-256), regardless of suffix; unreadable files surface a dataset
+  issue and the scan continues.
+- Only ``*.jpg``/``*.JPG`` files participate in image validation and
+  sampling; other files under the images directory are inventoried and
+  flagged ``UNSUPPORTED_IMAGE_FORMAT``. Only ``*.xml`` files participate in
+  annotation pairing.
+- Layout directories (domain, ``train``, ``images``, ``annotations``,
+  ``test``) that are symlinks/junctions are rejected outright and surfaced
+  as ``UNSAFE_SOURCE_PATH``; they are never walked or read.
 - Hashing is byte-level stable: raw SHA-256 over file bytes, pixel SHA-256
   over ``struct.pack(">II", width, height) + RGB pixel bytes``, dHash64 from
   a 9x8 LANCZOS grayscale resize, and a semantic annotation SHA-256 over a
@@ -80,13 +91,19 @@ class SourceFileRecord:
 
 @dataclass(frozen=True)
 class DomainLayout:
-    """Resolved layout of one domain subset."""
+    """Resolved layout of one domain subset.
+
+    ``unsafe_paths`` lists normalized relative paths of layout directories
+    that are symlinks/junctions and therefore unusable; they are surfaced as
+    ``UNSAFE_SOURCE_PATH`` issues and never walked or read.
+    """
 
     domain: DatasetDomain
     split: DatasetSplit
     images_dir: Path | None
     annotations_dir: Path | None
     public_test_dir: Path | None
+    unsafe_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -209,16 +226,55 @@ def _build_domain_layout(dataset_root: Path, domain: DatasetDomain) -> DomainLay
     domain_dir = dataset_root / domain.value
     if not domain_dir.is_dir():
         return DomainLayout(domain, split, None, None, None)
-    images_dir = domain_dir / "train" / "images"
-    annotations_dir = domain_dir / "train" / "annotations"
-    public_test_dir = domain_dir / "test" / "images"
+    unsafe: list[str] = []
+    if _is_link(domain_dir):
+        unsafe.append(_rel_path(domain_dir, dataset_root))
+        return DomainLayout(domain, split, None, None, None, tuple(unsafe))
+
+    train_dir = domain_dir / "train"
+    images_candidate: Path = domain_dir / "train" / "images"
+    annotations_candidate: Path = domain_dir / "train" / "annotations"
+    test_dir = domain_dir / "test"
+    public_test_candidate: Path = domain_dir / "test" / "images"
+
+    images_dir: Path | None
+    annotations_dir: Path | None
+    public_test_dir: Path | None
+    if _is_link(train_dir):
+        unsafe.append(_rel_path(train_dir, dataset_root))
+        images_dir = None
+        annotations_dir = None
+    else:
+        images_dir = _usable_layout_dir(images_candidate, dataset_root, unsafe)
+        annotations_dir = _usable_layout_dir(
+            annotations_candidate, dataset_root, unsafe
+        )
+    if _is_link(test_dir):
+        unsafe.append(_rel_path(test_dir, dataset_root))
+        public_test_dir = None
+    else:
+        public_test_dir = _usable_layout_dir(
+            public_test_candidate, dataset_root, unsafe
+        )
     return DomainLayout(
         domain,
         split,
-        images_dir if images_dir.is_dir() else None,
-        annotations_dir if annotations_dir.is_dir() else None,
-        public_test_dir if public_test_dir.is_dir() else None,
+        images_dir,
+        annotations_dir,
+        public_test_dir,
+        tuple(unsafe),
     )
+
+
+def _usable_layout_dir(
+    path: Path, dataset_root: Path, unsafe: list[str]
+) -> Path | None:
+    if not path.is_dir():
+        return None
+    if _is_link(path):
+        unsafe.append(_rel_path(path, dataset_root))
+        return None
+    return path
 
 
 def _scan_domain(
@@ -232,8 +288,11 @@ def _scan_domain(
     excluded_public_test: list[str],
 ) -> None:
     domain = domain_layout.domain
+    for unsafe_path in domain_layout.unsafe_paths:
+        issues.append(_unsafe_path_issue(domain, unsafe_path))
     if domain_layout.images_dir is None and domain_layout.annotations_dir is None:
-        issues.append(_make_issue(DatasetIssueCode.MISSING_REQUIRED_DOMAIN, domain))
+        if not domain_layout.unsafe_paths:
+            issues.append(_make_issue(DatasetIssueCode.MISSING_REQUIRED_DOMAIN, domain))
         return
 
     image_files, unsafe_image_dirs = (
@@ -241,41 +300,54 @@ def _scan_domain(
         if domain_layout.images_dir is not None
         else ([], [])
     )
-    xml_files, unsafe_xml_dirs = (
+    annotation_files, unsafe_xml_dirs = (
         _walk_files(domain_layout.annotations_dir, dataset_root)
         if domain_layout.annotations_dir is not None
         else ([], [])
     )
-    image_files = [file for file in image_files if file.suffix.lower() == _IMAGE_SUFFIX]
-    xml_files = [file for file in xml_files if file.suffix.lower() == _XML_SUFFIX]
+    xml_files = [
+        file for file in annotation_files if file.suffix.lower() == _XML_SUFFIX
+    ]
     for unsafe_dir in [*unsafe_image_dirs, *unsafe_xml_dirs]:
         issues.append(_unsafe_path_issue(domain, _rel_path(unsafe_dir, dataset_root)))
 
     image_rels = [_rel_path(file, dataset_root) for file in image_files]
-    xml_rels = [_rel_path(file, dataset_root) for file in xml_files]
+    annotation_rels = [_rel_path(file, dataset_root) for file in annotation_files]
     for group in _find_case_collisions(image_rels):
         issues.append(
             _make_issue(DatasetIssueCode.PATH_CASE_COLLISION, domain, paths=group)
         )
-    for group in _find_case_collisions(xml_rels):
+    for group in _find_case_collisions(annotation_rels):
         issues.append(
             _make_issue(DatasetIssueCode.PATH_CASE_COLLISION, domain, paths=group)
         )
     collided_images = {
         path for group in _find_case_collisions(image_rels) for path in group
     }
-    collided_xmls = {
-        path for group in _find_case_collisions(xml_rels) for path in group
+    collided_annotations = {
+        path for group in _find_case_collisions(annotation_rels) for path in group
     }
 
     xmls_by_stem: dict[str, Path] = {}
-    for file in xml_files:
+    unreadable_annotation_rels: set[str] = set()
+    for file in annotation_files:
         rel = _rel_path(file, dataset_root)
         if _unsafe_file_reason(file, rel, dataset_root):
             issues.append(_unsafe_path_issue(domain, rel))
             continue
-        source_files.append(_record_source(file, rel))
-        if rel not in collided_xmls:
+        record = _record_source(file, rel)
+        if record is None:
+            issues.append(
+                _make_issue(
+                    DatasetIssueCode.MALFORMED_XML,
+                    domain,
+                    paths=(rel,),
+                )
+            )
+            unreadable_annotation_rels.add(rel)
+            continue
+        source_files.append(record)
+        if file.suffix.lower() == _XML_SUFFIX and rel not in collided_annotations:
             xmls_by_stem[file.stem] = file
 
     valid_image_stems: set[str] = set()
@@ -286,11 +358,32 @@ def _scan_domain(
                 _unsafe_path_issue(domain, rel, sample_id=_sample_id(domain, file.stem))
             )
             continue
-        source_files.append(_record_source(file, rel))
+        record = _record_source(file, rel)
+        if record is None:
+            issues.append(
+                _make_issue(
+                    DatasetIssueCode.CORRUPT_IMAGE,
+                    domain,
+                    sample_id=_sample_id(domain, file.stem),
+                    paths=(rel,),
+                )
+            )
+            continue
+        source_files.append(record)
         if rel in collided_images:
             continue
         stem = file.stem
         sample_id = _sample_id(domain, stem)
+        if file.suffix.lower() != _IMAGE_SUFFIX:
+            issues.append(
+                _make_issue(
+                    DatasetIssueCode.UNSUPPORTED_IMAGE_FORMAT,
+                    domain,
+                    sample_id=sample_id,
+                    paths=(rel,),
+                )
+            )
+            continue
         image_info, image_issues = _validate_image(
             file, domain, sample_id, rel, max_image_pixels
         )
@@ -328,7 +421,7 @@ def _scan_domain(
         rel = _rel_path(file, dataset_root)
         if _unsafe_file_reason(file, rel, dataset_root):
             continue
-        if rel in collided_xmls:
+        if rel in collided_annotations or rel in unreadable_annotation_rels:
             continue
         if file.stem not in valid_image_stems:
             issues.append(
@@ -352,7 +445,17 @@ def _scan_domain(
             if _unsafe_file_reason(file, rel, dataset_root):
                 issues.append(_unsafe_path_issue(domain, rel))
                 continue
-            source_files.append(_record_source(file, rel))
+            record = _record_source(file, rel)
+            if record is None:
+                issues.append(
+                    _make_issue(
+                        DatasetIssueCode.CORRUPT_IMAGE,
+                        domain,
+                        paths=(rel,),
+                    )
+                )
+                continue
+            source_files.append(record)
             excluded_public_test.append(rel)
             issues.append(
                 _make_issue(
@@ -857,8 +960,11 @@ def _is_safe_rel_path(rel: str) -> bool:
     return True
 
 
-def _record_source(file: Path, rel: str) -> SourceFileRecord:
-    data = file.read_bytes()
+def _record_source(file: Path, rel: str) -> SourceFileRecord | None:
+    try:
+        data = file.read_bytes()
+    except OSError:
+        return None
     return SourceFileRecord(
         path=rel,
         size_bytes=len(data),

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -676,6 +677,44 @@ class TestImageValidation:
             DatasetIssueCode.UNSUPPORTED_IMAGE_FORMAT,
         ]
 
+    @pytest.mark.parametrize("name", ["unexpected.png", "photo.jpeg", "readme.txt"])
+    def test_unsupported_image_file_inventoried_and_flagged(
+        self, scratch_dir: Path, name: str
+    ) -> None:
+        root = build_rdd2022(scratch_dir / "data", image_count=0)
+        images = root / "Japan" / "train" / "images"
+        annotations = root / "Japan" / "train" / "annotations"
+        write_bytes(images, name, jpeg_bytes())
+        write_voc(annotations, Path(name).stem)
+        result = scan_tree(root)
+        assert result.samples == ()
+        assert any(
+            record.path == f"Japan/train/images/{name}"
+            for record in result.source_files
+        )
+        assert any(
+            i.code is DatasetIssueCode.UNSUPPORTED_IMAGE_FORMAT for i in result.issues
+        )
+        assert any(i.code is DatasetIssueCode.ORPHAN_ANNOTATION for i in result.issues)
+
+    @pytest.mark.parametrize("name", ["notes.txt", "README"])
+    def test_annotation_dir_extra_files_inventoried(
+        self, scratch_dir: Path, name: str
+    ) -> None:
+        root = build_rdd2022(scratch_dir / "data", image_count=0)
+        build_domain(root, DatasetDomain.JAPAN, image_count=1)
+        annotations = root / "Japan" / "train" / "annotations"
+        write_bytes(annotations, name, b"not an annotation")
+        result = scan_tree(root)
+        assert len(result.samples) == 1
+        assert any(
+            record.path == f"Japan/train/annotations/{name}"
+            for record in result.source_files
+        )
+        assert not any(
+            i.code is DatasetIssueCode.ORPHAN_ANNOTATION for i in result.issues
+        )
+
     def test_oversized_image(self, scratch_dir: Path) -> None:
         root = build_rdd2022(scratch_dir / "data", image_count=0)
         build_domain(root, DatasetDomain.JAPAN, image_count=1)
@@ -874,6 +913,92 @@ class TestPathSafety:
         }
 
 
+class TestLayoutJunctionSafety:
+    def test_domain_level_junction_unsafe(self, scratch_dir: Path) -> None:
+        root = build_rdd2022(scratch_dir / "data", image_count=0)
+        outside = scratch_dir / "outside"
+        build_domain(outside, DatasetDomain.JAPAN, image_count=1)
+        shutil.rmtree(root / "Japan")
+        make_directory_link(root / "Japan", outside / "Japan")
+        result = scan_tree(root)
+        assert all(s.domain is not DatasetDomain.JAPAN for s in result.samples)
+        assert any(
+            i.code is DatasetIssueCode.UNSAFE_SOURCE_PATH
+            and i.domain is DatasetDomain.JAPAN
+            for i in result.issues
+        )
+        assert not any(
+            i.code is DatasetIssueCode.MISSING_REQUIRED_DOMAIN for i in result.issues
+        )
+
+    def test_domain_level_junction_inside_root_unsafe(self, scratch_dir: Path) -> None:
+        root = build_rdd2022(scratch_dir / "data", image_count=0)
+        shutil.rmtree(root / "Japan")
+        make_directory_link(root / "Japan", root / "India")
+        result = scan_tree(root)
+        assert all(s.domain is not DatasetDomain.JAPAN for s in result.samples)
+        assert any(
+            i.code is DatasetIssueCode.UNSAFE_SOURCE_PATH
+            and i.domain is DatasetDomain.JAPAN
+            for i in result.issues
+        )
+
+    def test_train_level_junction_unsafe(self, scratch_dir: Path) -> None:
+        root = build_rdd2022(scratch_dir / "data", image_count=0)
+        build_domain(root, DatasetDomain.JAPAN, image_count=1)
+        outside = scratch_dir / "outside"
+        write_jpeg(outside / "images", "sneaky")
+        write_voc(outside / "annotations", "sneaky")
+        shutil.rmtree(root / "Japan" / "train")
+        make_directory_link(root / "Japan" / "train", outside)
+        result = scan_tree(root)
+        assert all(s.domain is not DatasetDomain.JAPAN for s in result.samples)
+        assert any(
+            i.code is DatasetIssueCode.UNSAFE_SOURCE_PATH
+            and i.domain is DatasetDomain.JAPAN
+            for i in result.issues
+        )
+        assert not any(
+            i.code is DatasetIssueCode.MISSING_REQUIRED_DOMAIN for i in result.issues
+        )
+
+    def test_images_level_junction_unsafe(self, scratch_dir: Path) -> None:
+        root = build_rdd2022(scratch_dir / "data", image_count=0)
+        build_domain(root, DatasetDomain.JAPAN, image_count=1)
+        outside = scratch_dir / "outside"
+        write_jpeg(outside, "sneaky")
+        shutil.rmtree(root / "Japan" / "train" / "images")
+        make_directory_link(root / "Japan" / "train" / "images", outside)
+        result = scan_tree(root)
+        assert all(s.domain is not DatasetDomain.JAPAN for s in result.samples)
+        assert any(
+            i.code is DatasetIssueCode.UNSAFE_SOURCE_PATH
+            and i.domain is DatasetDomain.JAPAN
+            for i in result.issues
+        )
+        assert any(
+            i.code is DatasetIssueCode.ORPHAN_ANNOTATION
+            and i.domain is DatasetDomain.JAPAN
+            for i in result.issues
+        )
+
+    def test_test_dir_junction_unsafe(self, scratch_dir: Path) -> None:
+        root = build_rdd2022(scratch_dir / "data", image_count=0)
+        build_domain(root, DatasetDomain.JAPAN, image_count=1)
+        outside = scratch_dir / "outside"
+        write_jpeg(outside / "images", "sneaky")
+        shutil.rmtree(root / "Japan" / "test", ignore_errors=True)
+        make_directory_link(root / "Japan" / "test", outside)
+        result = scan_tree(root)
+        assert len(result.samples) == 1
+        assert result.excluded_public_test == ()
+        assert any(
+            i.code is DatasetIssueCode.UNSAFE_SOURCE_PATH
+            and i.domain is DatasetDomain.JAPAN
+            for i in result.issues
+        )
+
+
 class TestAggregation:
     def test_multiple_defects_aggregated(self, scratch_dir: Path) -> None:
         root = build_rdd2022(scratch_dir / "data", image_count=0)
@@ -981,3 +1106,29 @@ class TestReadOnly:
         scan_tree(root)
         scan_tree(root)
         assert tree_fingerprint(root) == before
+
+    def test_unreadable_source_file_does_not_abort_scan(
+        self, scratch_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = build_rdd2022(scratch_dir / "data", image_count=0)
+        build_domain(root, DatasetDomain.JAPAN, image_count=1)
+        images = root / "Japan" / "train" / "images"
+        target = images / "Japan_00001.jpg"
+        real_read_bytes = Path.read_bytes
+
+        def selective_read_bytes(self: Path, *args: object, **kwargs: object) -> bytes:
+            if os.path.normcase(str(self)) == os.path.normcase(str(target)):
+                raise PermissionError("permission denied")
+            return real_read_bytes(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_bytes", selective_read_bytes)
+        result = scan_tree(root)
+        assert result.samples == ()
+        assert [i.code for i in result.issues] == [
+            DatasetIssueCode.CORRUPT_IMAGE,
+            DatasetIssueCode.ORPHAN_ANNOTATION,
+        ]
+        assert not any(
+            record.path == "Japan/train/images/Japan_00001.jpg"
+            for record in result.source_files
+        )
